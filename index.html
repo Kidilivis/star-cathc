@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0b1026">
+<title>Поймай звёзды</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;overflow:hidden;background:#0b1026;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none;}
+  #game{position:fixed;inset:0;display:block;}
+  .hud{position:fixed;top:0;left:0;right:0;padding:calc(env(safe-area-inset-top) + 14px) 20px 0;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;color:#fff;font-variant-numeric:tabular-nums;}
+  .score{font-size:34px;font-weight:700;letter-spacing:-1px;text-shadow:0 2px 12px rgba(120,190,255,.45);}
+  .best{font-size:13px;opacity:.5;margin-top:2px;letter-spacing:.4px;}
+  .lives{display:flex;gap:7px;padding-top:8px;}
+  .heart{width:13px;height:13px;border-radius:50%;background:#ff5d7a;box-shadow:0 0 12px rgba(255,93,122,.85);transition:transform .18s,opacity .18s;}
+  .heart.lost{background:#2a3350;box-shadow:none;opacity:.35;transform:scale(.75);}
+  .overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:32px;color:#fff;background:radial-gradient(circle at 50% 42%,rgba(35,60,130,.9),rgba(11,16,38,.97) 68%);backdrop-filter:blur(3px);transition:opacity .3s;z-index:5;}
+  .overlay.hidden{opacity:0;pointer-events:none;}
+  .title{font-size:36px;font-weight:800;letter-spacing:-1.2px;line-height:1.1;margin-bottom:10px;}
+  .title span{background:linear-gradient(90deg,#7ce7ff,#ffd166);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+  .sub{font-size:15px;opacity:.65;line-height:1.55;max-width:290px;margin-bottom:28px;}
+  .btn{border:none;padding:16px 42px;border-radius:999px;font-size:17px;font-weight:700;color:#08122b;background:linear-gradient(135deg,#8be9fd,#7ce7ff 55%,#ffd166);box-shadow:0 10px 30px rgba(124,231,255,.35);cursor:pointer;font-family:inherit;}
+  .btn:active{transform:scale(.97);}
+  .final{font-size:15px;opacity:.7;margin-bottom:6px;}
+  .final b{font-size:40px;display:block;color:#ffd166;margin-top:4px;letter-spacing:-1px;}
+  .hint{position:fixed;bottom:calc(env(safe-area-inset-bottom) + 22px);left:0;right:0;text-align:center;font-size:13px;color:#fff;opacity:.28;pointer-events:none;letter-spacing:.3px;}
+</style>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div class="hud">
+  <div>
+    <div class="score" id="score">0</div>
+    <div class="best" id="best">рекорд 0</div>
+  </div>
+  <div class="lives" id="lives"></div>
+</div>
+
+<div class="hint" id="hint">ведите палец по экрану</div>
+
+<div class="overlay" id="start">
+  <div class="title">Поймай <span>звёзды</span></div>
+  <div class="sub">Ведите палец по экрану и собирайте золотые звёзды. Красные кометы отнимают жизнь.</div>
+  <button class="btn" id="startBtn">Играть</button>
+</div>
+
+<div class="overlay hidden" id="over">
+  <div class="final">Ваш результат<b id="finalScore">0</b></div>
+  <div class="sub" id="finalNote" style="margin-top:16px;">—</div>
+  <button class="btn" id="againBtn">Ещё раз</button>
+</div>
+
+<script>
+(function(){
+  const cvs = document.getElementById('game');
+  const ctx = cvs.getContext('2d');
+  let W = 0, H = 0, DPR = 1;
+
+  function resize(){
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    cvs.width = W * DPR; cvs.height = H * DPR;
+    cvs.style.width = W + 'px'; cvs.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // ---------- состояние ----------
+  const S = {
+    running: false,
+    score: 0,
+    lives: 3,
+    best: +(localStorage.getItem('starcatch_best') || 0),
+    t: 0,            // время в секундах
+    speed: 1,        // множитель скорости
+    spawnTimer: 0,
+    items: [],
+    particles: [],
+    basket: { x: 0, y: 0, r: 34, targetX: 0, targetY: 0, glow: 0 },
+    stars: []
+  };
+
+  const el = {
+    score: document.getElementById('score'),
+    best: document.getElementById('best'),
+    lives: document.getElementById('lives'),
+    start: document.getElementById('start'),
+    over: document.getElementById('over'),
+    finalScore: document.getElementById('finalScore'),
+    finalNote: document.getElementById('finalNote'),
+    hint: document.getElementById('hint')
+  };
+
+  el.best.textContent = 'рекорд ' + S.best;
+
+  // фоновые звёзды
+  function makeStars(){
+    S.stars = [];
+    const n = Math.round((W * H) / 9000);
+    for (let i = 0; i < n; i++){
+      S.stars.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        r: Math.random() * 1.4 + .3,
+        a: Math.random() * .6 + .15,
+        v: Math.random() * .12 + .03
+      });
+    }
+  }
+  makeStars();
+  window.addEventListener('resize', makeStars);
+
+  function renderLives(){
+    el.lives.innerHTML = '';
+    const total = 3;
+    for (let i = 0; i < total; i++){
+      const d = document.createElement('div');
+      d.className = 'heart' + (i >= S.lives ? ' lost' : '');
+      el.lives.appendChild(d);
+    }
+  }
+  renderLives();
+
+  // ---------- управление ----------
+  function point(e){
+    const t = e.touches ? e.touches[0] : e;
+    if (!t) return null;
+    return { x: t.clientX, y: t.clientY };
+  }
+  function move(e){
+    const p = point(e);
+    if (!p) return;
+    S.basket.targetX = p.x;
+    S.basket.targetY = p.y;
+    el.hint.style.opacity = 0;
+  }
+  cvs.addEventListener('pointerdown', move);
+  cvs.addEventListener('pointermove', move);
+  document.addEventListener('touchmove', e => { if (S.running) e.preventDefault(); }, { passive:false });
+  window.addEventListener('keydown', e => {
+    if (!S.running) return;
+    const step = 60;
+    if (e.key === 'ArrowLeft')  S.basket.targetX -= step;
+    if (e.key === 'ArrowRight') S.basket.targetX += step;
+    if (e.key === 'ArrowUp')    S.basket.targetY -= step;
+    if (e.key === 'ArrowDown')  S.basket.targetY += step;
+  });
+
+  // ---------- игра ----------
+  function reset(){
+    S.score = 0; S.lives = 3; S.t = 0; S.speed = 1;
+    S.spawnTimer = .4; S.items = []; S.particles = [];
+    S.basket.x = W / 2; S.basket.y = H - 130;
+    S.basket.targetX = W / 2; S.basket.targetY = H - 130;
+    S.basket.glow = 0;
+    el.score.textContent = '0';
+    renderLives();
+  }
+
+  function start(){
+    reset();
+    S.running = true;
+    el.start.classList.add('hidden');
+    el.over.classList.add('hidden');
+    el.hint.style.opacity = '';
+  }
+
+  function end(){
+    S.running = false;
+    if (S.score > S.best){
+      S.best = S.score;
+      saveBest();
+      el.best.textContent = 'рекорд ' + S.best;
+      el.finalNote.textContent = 'Новый рекорд!';
+    } else {
+      el.finalNote.textContent = 'Рекорд: ' + S.best;
+    }
+    el.finalScore.textContent = S.score;
+    el.over.classList.remove('hidden');
+  }
+
+  function spawn(){
+    const isComet = Math.random() < Math.min(.14 + S.t * .006, .34);
+    const r = isComet ? 17 : 15;
+    S.items.push({
+      x: r + 14 + Math.random() * (W - 2 * r - 28),
+      y: -r - 10,
+      vx: (Math.random() - .5) * 40 * S.speed,
+      vy: (95 + Math.random() * 60) * S.speed,
+      r: r,
+      type: isComet ? 'comet' : 'star',
+      rot: Math.random() * Math.PI * 2,
+      rotV: (Math.random() - .5) * 4,
+      alive: true
+    });
+  }
+
+  function burst(x, y, color, n){
+    for (let i = 0; i < n; i++){
+      const a = Math.random() * Math.PI * 2;
+      const sp = 60 + Math.random() * 220;
+      S.particles.push({
+        x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        life: 1, decay: 1.6 + Math.random(), color,
+        size: 1.5 + Math.random() * 2.5
+      });
+    }
+  }
+
+  function drawStar(x, y, r, rot, color, glowColor){
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(rot);
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++){
+      const rad = (i % 2 === 0) ? r : r * .45;
+      const a = (Math.PI / 5) * i - Math.PI / 2;
+      const px = Math.cos(a) * rad, py = Math.sin(a) * rad;
+      i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.shadowColor = glowColor;
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function update(dt){
+    S.t += dt;
+    S.speed = 1 + S.t * 0.035;
+    S.basket.glow *= Math.pow(.02, dt);
+
+    // плавное движение корзины к пальцу
+    const k = 1 - Math.pow(0.0008, dt);
+    S.basket.x += (S.basket.targetX - S.basket.x) * k;
+    S.basket.y += (S.basket.targetY - S.basket.y) * k;
+    S.basket.x = Math.max(S.basket.r, Math.min(W - S.basket.r, S.basket.x));
+    S.basket.y = Math.max(S.basket.r, Math.min(H - S.basket.r, S.basket.y));
+
+    // спавн
+    S.spawnTimer -= dt;
+    if (S.spawnTimer <= 0){
+      spawn();
+      const base = Math.max(.28, .82 - S.t * .012);
+      S.spawnTimer = base * (.7 + Math.random() * .6);
+    }
+
+    // объекты
+    for (const it of S.items){
+      it.x += it.vx * dt;
+      it.y += it.vy * dt;
+      it.rot += it.rotV * dt;
+      if (it.x < it.r || it.x > W - it.r) it.vx *= -1;
+
+      // столкновение
+      const dx = it.x - S.basket.x, dy = it.y - S.basket.y;
+      const dist = Math.hypot(dx, dy);
+      if (it.alive && dist < S.basket.r + it.r * .8){
+        it.alive = false;
+        if (it.type === 'star'){
+          S.score += 1;
+          el.score.textContent = S.score;
+          S.basket.glow = 1;
+          if (TG){ try { TG.HapticFeedback.impactOccurred('light'); } catch(e){} }
+          burst(it.x, it.y, '#ffd166', 14);
+        } else {
+          S.lives--;
+          renderLives();
+          if (TG){ try { TG.HapticFeedback.notificationOccurred('error'); } catch(e){} }
+          burst(it.x, it.y, '#ff5d7a', 20);
+          if (S.lives <= 0){ end(); return; }
+        }
+      }
+
+      // упало мимо
+      if (it.y - it.r > H + 40 && it.alive){
+        it.alive = false;
+        if (it.type === 'star'){
+          S.lives--;
+          renderLives();
+          burst(it.x, H - 30, '#7a86b8', 8);
+          if (S.lives <= 0){ end(); return; }
+        }
+      }
+    }
+    S.items = S.items.filter(it => it.alive && it.y < H + 80);
+
+    // частицы
+    for (const p of S.particles){
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.vy += 180 * dt;
+      p.vx *= Math.pow(.25, dt);
+      p.life -= p.decay * dt;
+    }
+    S.particles = S.particles.filter(p => p.life > 0);
+  }
+
+  function draw(){
+    // фон
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#0b1026');
+    g.addColorStop(.55, '#101a3d');
+    g.addColorStop(1, '#1b2a5c');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    // фоновые звёзды
+    for (const s of S.stars){
+      ctx.globalAlpha = s.a;
+      ctx.fillStyle = '#cfe3ff';
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, 7);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // частицы
+    for (const p of S.particles){
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, 7);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // объекты
+    for (const it of S.items){
+      if (it.type === 'star') drawStar(it.x, it.y, it.r, it.rot, '#ffd166', 'rgba(255,209,102,.9)');
+      else {
+        ctx.beginPath();
+        ctx.arc(it.x, it.y, it.r, 0, 7);
+        ctx.shadowColor = 'rgba(255,93,122,.95)';
+        ctx.shadowBlur = 22;
+        const cg = ctx.createRadialGradient(it.x - it.r*.3, it.y - it.r*.3, 2, it.x, it.y, it.r);
+        cg.addColorStop(0, '#ffa3b3');
+        cg.addColorStop(1, '#e01f45');
+        ctx.fillStyle = cg;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    // корзина-ловец
+    const b = S.basket;
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    // ореол
+    const hg = ctx.createRadialGradient(0, 0, 0, 0, 0, b.r * 2.4);
+    hg.addColorStop(0, 'rgba(124,231,255,' + (0.16 + b.glow * .45) + ')');
+    hg.addColorStop(1, 'rgba(124,231,255,0)');
+    ctx.fillStyle = hg;
+    ctx.beginPath(); ctx.arc(0, 0, b.r * 2.4, 0, 7); ctx.fill();
+    // кольцо
+    ctx.beginPath();
+    ctx.arc(0, 0, b.r, 0, 7);
+    ctx.strokeStyle = '#7ce7ff';
+    ctx.lineWidth = 3.5;
+    ctx.shadowColor = 'rgba(124,231,255,.9)';
+    ctx.shadowBlur = 20;
+    ctx.stroke();
+    // центр
+    ctx.beginPath();
+    ctx.arc(0, 0, 5, 0, 7);
+    ctx.fillStyle = '#eaf9ff';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  let last = performance.now();
+  function loop(now){
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    if (S.running) update(dt);
+    else {
+      // лёгкое мерцание на паузах
+      S.t += dt * 0;
+    }
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+
+  // ---------- Telegram Mini App ----------
+  const TG = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+  let cloudBest = null;
+  if (TG){
+    try {
+      TG.ready();
+      TG.expand();
+      if (TG.setHeaderColor) TG.setHeaderColor('#0b1026');
+      if (TG.setBackgroundColor) TG.setBackgroundColor('#0b1026');
+      if (TG.disableVerticalSwipes) TG.disableVerticalSwipes();
+      if (TG.enableClosingConfirmation) TG.enableClosingConfirmation();
+    } catch(e){}
+    // облачный рекорд
+    try { TG.CloudStorage.getItem('starcatch_best', (err, val) => {
+      if (!err && val && +val > S.best){
+        S.best = +val; el.best.textContent = 'рекорд ' + S.best;
+      }
+    }); } catch(e){}
+    if (TG.MainButton){
+      try {
+        TG.MainButton.setParams({text:'ИГРАТЬ', color:'#7ce7ff', text_color:'#08122b'});
+        TG.MainButton.onClick(() => { start(); });
+      } catch(e){}
+    }
+  }
+
+  function saveBest(){
+    try { localStorage.setItem('starcatch_best', String(S.best)); } catch(e){}
+    if (TG){
+      try { TG.CloudStorage.setItem('starcatch_best', String(S.best)); } catch(e){}
+      try { TG.HapticFeedback.notificationOccurred('success'); } catch(e){}
+    }
+  }
+
+  function startDots(){
+    if (TG && TG.MainButton){ try { TG.MainButton.hide(); } catch(e){} }
+  }
+
+  if (TG && TG.MainButton){
+    try { TG.MainButton.show(); } catch(e){}
+    const sb = document.getElementById('startBtn');
+    if (sb) sb.style.display = 'none';
+    const ab = document.getElementById('againBtn');
+    if (ab) ab.style.display = 'none';
+    if (TG.onEvent) TG.onEvent('mainButtonClicked', () => {
+      if (!S.running){ start(); }
+    });
+  }
+
+  document.getElementById('startBtn').addEventListener('click', function(){ startDots(); start(); });
+  document.getElementById('againBtn').addEventListener('click', function(){ startDots(); start(); });
+})();
+</script>
+</body>
+</html>
